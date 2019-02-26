@@ -207,6 +207,7 @@ class LSTMDecoder(FairseqIncrementalDecoder):
 
             for i, rnn in enumerate(self.layers):
                 # recurrent cell
+#                import pdb; pdb.set_trace()
                 hidden, cell = rnn(input, (prev_hiddens[i], prev_cells[i]))
 
                 # hidden state becomes the input to the next layer
@@ -505,6 +506,7 @@ class AttentiveWriter(Attention):
     self.to_write = nn.Sequential(
       nn.Linear(self.q_size, self.h_size),
       nn.ReLU(inplace=True),
+#      nn.PReLU(self.h_size),
 #      nn.LeakyReLU(),
       nn.Linear(self.h_size, self.k_size),
       nn.Tanh() # to bound updates in [-1, 1], since gru outputs are [-1, 1]
@@ -569,6 +571,8 @@ class Scratchpad(FairseqModel):
       embed_dim = args.encoder_embed_dim,
       hidden_size = args.encoder_hidden_dim // 2,
       num_layers = args.encoder_n_layers,
+      dropout_out = args.encoder_dropout,
+      dropout_in = args.encoder_dropout,
       bidirectional = True
     )
     decoder = LSTMDecoder(
@@ -577,6 +581,8 @@ class Scratchpad(FairseqModel):
       hidden_size = args.decoder_hidden_dim,
       num_layers = args.decoder_n_layers,
       encoder_output_units = args.encoder_hidden_dim,
+      dropout_out = args.decoder_dropout,
+      dropout_in = args.decoder_dropout,
 #      use_scratchpad = args.scratchpad,
       use_scratchpad=True,
 #      use_scratchpad=False,
