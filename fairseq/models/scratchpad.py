@@ -26,7 +26,7 @@ class LSTMDecoder(FairseqIncrementalDecoder):
         num_layers=1, dropout_in=0.1, dropout_out=0.1, attention=True,
         encoder_output_units=512, pretrained_embed=None,
         share_input_output_embed=False, adaptive_softmax_cutoff=None,
-        use_scratchpad = False,
+        use_scratchpad = False, residual=False
     ):
         super().__init__(dictionary)
         self.dropout_in = dropout_in
@@ -35,6 +35,7 @@ class LSTMDecoder(FairseqIncrementalDecoder):
         self.share_input_output_embed = share_input_output_embed
         self.need_attn = True
         self.use_scratchpad = use_scratchpad
+        self.residual = residual
 
         self.adaptive_softmax = None
         num_embeddings = len(dictionary)
@@ -118,6 +119,9 @@ class LSTMDecoder(FairseqIncrementalDecoder):
 
             for i, rnn in enumerate(self.layers):
                 hidden, cell = rnn(input, (prev_hiddens[i], prev_cells[i]))
+                if self.residual:
+                    if i != 0 and i != (len(self.layers) - 1):
+                       hidden = F.layer_norm(hidden + input, (hidden.size(1),) )
 
                 # hidden state becomes the input to the next layer
                 input = F.dropout(hidden, p=self.dropout_out, training=self.training)
@@ -249,7 +253,8 @@ class Attention(nn.Module):
 #    )
     self.to_score = nn.Sequential(
       nn.Linear(self.q_size + self.k_size, self.h_size, bias=False),
-      nn.LeakyReLU(),
+      nn.ReLU(),
+#      nn.LeakyReLU(),
       nn.Linear(self.h_size, 1, bias=False),
     )
 
@@ -342,6 +347,8 @@ class Scratchpad(FairseqModel):
     parser.add_argument(
       '--decoder-dropout',     type=float, metavar='N')
     parser.add_argument(
+      '--decoder-residual',    type=bool, default=False)
+    parser.add_argument(
       '--scratchpad', dest='scratchpad', action='store_true')
     parser.add_argument(
       '--no-scratchpad', dest='scratchpad', action='store_false')
@@ -368,6 +375,7 @@ class Scratchpad(FairseqModel):
       dropout_out = args.decoder_dropout,
       dropout_in = args.decoder_dropout,
       use_scratchpad = args.scratchpad,
+      residual = args.decoder_residual,
     )
 
     model = Scratchpad(encoder, decoder)
@@ -382,17 +390,18 @@ from fairseq.models import register_model_architecture
 
 @register_model_architecture('scratchpad', 'scratchpad_arch')
 def scratchpad_arch(args):
-  ###                      Encoder Arguments                      ###
-  args.encoder_embed_dim =   getattr(args, 'encoder_embed_dim',  128)
-  args.encoder_hidden_dim =  getattr(args, 'encoder_hidden_dim', 512)
-  args.encoder_n_layers =    getattr(args, 'encoder_n_layers',     3)
-  args.encoder_dropout =     getattr(args, 'encoder_dropout',    0.1)
-  ###################################################################
+  ###                      Encoder Arguments                       ###
+  args.encoder_embed_dim =   getattr(args, 'encoder_embed_dim',   128)
+  args.encoder_hidden_dim =  getattr(args, 'encoder_hidden_dim',  512)
+  args.encoder_n_layers =    getattr(args, 'encoder_n_layers',      3)
+  args.encoder_dropout =     getattr(args, 'encoder_dropout',     0.1)
+  ####################################################################
 
-  ###                      Decoder Arguments                      ###
-  args.decoder_embed_dim =   getattr(args, 'decoder_embed_dim',  128)
-  args.decoder_hidden_dim =  getattr(args, 'decoder_hidden_dim', 512)
-  args.decoder_n_layers =    getattr(args, 'decoder_n_layers',     3)
-  args.decoder_dropout =     getattr(args, 'decoder_dropout',    0.1)
-  args.scratchpad =          getattr(args, 'scratchpad',        True)
+  ###                      Decoder Arguments                       ###
+  args.decoder_embed_dim =   getattr(args, 'decoder_embed_dim',   128)
+  args.decoder_hidden_dim =  getattr(args, 'decoder_hidden_dim',  512)
+  args.decoder_n_layers =    getattr(args, 'decoder_n_layers',      3)
+  args.decoder_dropout =     getattr(args, 'decoder_dropout',     0.1)
+  args.scratchpad =          getattr(args, 'scratchpad',         True)
+  args.decoder_residual =    getattr(args, 'decoder_residual',  False)
   ###################################################################
