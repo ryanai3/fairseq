@@ -5,63 +5,8 @@ from fairseq import utils
 from fairseq.models import FairseqEncoder
 from fairseq.models.lstm import LSTMEncoder
 
-class BADLSTMEncoder(FairseqEncoder):
+import numpy as np
 
-  def __init__(
-    self, args, dictionary, embed_dim=128, hidden_dim=512, n_layers=2, dropout=0.1
-  ):
-    super().__init__(dictionary)
-    self.args = args
-    self.n_layers = n_layers
-    self.h_dim = hidden_dim // 2
-
-    self.embed_tokens = nn.Embedding(
-      num_embeddings = len(dictionary),
-      embedding_dim = embed_dim,
-      padding_idx = dictionary.pad(),
-    )
-
-    self.lstm = nn.LSTM(
-      input_size = embed_dim,
-      hidden_size=self.h_dim,
-      num_layers=n_layers,
-      dropout=dropout,
-      bidirectional=True
-    )
-
-  def get_pad(self, src_lengths, ssize):
-    idxs = torch.arange(ssize[0]).expand(ssize[1], ssize[0]).t().to(src_lengths.device)
-    return (idxs < src_lengths.unsqueeze(1)).t() # BxT
-
-  def forward(self, src_tokens, src_lengths):
-    bs = src_lengths.size(0)
-    pad_mask = self.get_pad(src_lengths, src_tokens.size())
-
-    x = self.embed_tokens(src_tokens)
-    x = pack_padded_sequence(x, src_lengths, batch_first=True)
-    outputs, (h_n, c_n) = self.lstm(x)
-    unpacked_outputs, _ = pad_packed_sequence(outputs, batch_first=False)
-    h_n_b_l = h_n.view(
-      self.n_layers, 2, bs, self.h_dim
-    ).transpose(
-      1, 2
-    ).contiguous().view(
-      self.n_layers, bs, self.h_dim * 2
-    )
-    return {
-      'output': unpacked_outputs,
-      'final': h_n_b_l,
-      'pad_mask': pad_mask,
-      'lens': src_lengths,
-    }
-
-  def reorder_encoder_out(self, encoder_out, new_order):
-    return {
-      'output': encoder_out['output'].index_select(new_order, dim=1),
-      'pad_mask': encoder_out['pad_mask'].index_select(new_order, dim=0),
-      'final': encoder_out['final'].index_select(new_order, dim=1),
-      'lens': encouder_out['lens'][new_order],
-    }
 from fairseq.models import FairseqModel, register_model
 #################
 
@@ -72,42 +17,8 @@ from torch.nn import functional as F
 
 from fairseq.models import FairseqIncrementalDecoder
 
-class MultiLayerGRUCell(nn.Module):
-
-  def __init__(self, embed_size, hidden_size, n_layers, drop_prob):
-    super().__init__()
-    self.n_layers = n_layers
-    self.embed_size = embed_size
-    self.hidden_size = hidden_size
-    self.n_layers = n_layers
-    self.rnns = nn.ModuleList(
-      [nn.GRUCell(
-        input_size = self.embed_size, #+ self.hidden_size,
-        hidden_size = self.hidden_size
-      )] + \
-      [nn.GRUCell(
-         input_size = self.hidden_size,
-         hidden_size = self.hidden_size,
-       ) for i in range(self.n_layers - 1)]
-    )
-    self.dropout = nn.Dropout(drop_prob)
-
-
-  def forward(self, x, h):
-    x_l = x
-    new_h = []
-
-    for i, (rnn, h_l) in enumerate(zip(self.rnns, h)):
-      x_n = rnn(self.dropout(x_l), h_l)
-      new_h.append(x_n)
-      if (i == 0):
-        x_l = x_n
-      else:
-        x_l = x_n + x_l
-    return torch.stack(new_h, 0)
-
-
 from fairseq.models.lstm import Embedding, LSTMCell
+
 class LSTMDecoder(FairseqIncrementalDecoder):
     """LSTM decoder."""
     def __init__(
@@ -206,8 +117,6 @@ class LSTMDecoder(FairseqIncrementalDecoder):
             input = torch.cat((x[j, :, :], input_feed), dim=1)
 
             for i, rnn in enumerate(self.layers):
-                # recurrent cell
-#                import pdb; pdb.set_trace()
                 hidden, cell = rnn(input, (prev_hiddens[i], prev_cells[i]))
 
                 # hidden state becomes the input to the next layer
@@ -270,13 +179,12 @@ class LSTMDecoder(FairseqIncrementalDecoder):
             return
 
         #EDITED
-        def reorder_state(state, idx=0):
-            if isinstance(state, list) or isinstance(state, tuple):
-                return [reorder_state(state_i, idx) for (state_i, idx) in zip(state, [0, 0, 0, 1])]
-            return state.index_select(idx, new_order)
+        def reorder_state(state, idx):
+          if isinstance(state, list) or isinstance(state, tuple):
+            return [reorder_state(state_i, idx) for state_i in state]
+          return state.index_select(idx, new_order)
 
-        #new_state = tuple(map(reorder_state, cached_state))
-        new_state = reorder_state(cached_state)
+        new_state = [reorder_state(sub, idx) for (sub, idx) in zip(cached_state, [0, 0, 0, 1])]
         utils.set_incremental_state(self, incremental_state, 'cached_state', new_state)
 
     def max_positions(self):
@@ -286,129 +194,6 @@ class LSTMDecoder(FairseqIncrementalDecoder):
     def make_generation_fast_(self, need_attn=False, **kwargs):
         self.need_attn = need_attn
 
-class ScratchpadDecoder(FairseqIncrementalDecoder):
-
-  def __init__(
-    self, dictionary, encoder_hidden_dim=512, embed_dim=512, hidden_dim=512,
-    n_layers=1, dropout=0.1
-  ):
-    super().__init__(dictionary)
-    self.n_layers = n_layers
-
-    self.embed_tokens = nn.Embedding(
-      num_embeddings = len(dictionary),
-      embedding_dim=embed_dim,
-      padding_idx=dictionary.pad(),
-    )
-
-    self.enc2dec = nn.Sequential(
-      nn.Linear(encoder_hidden_dim, hidden_dim),
-      nn.Tanh()
-    )
-
-
-#    self.attention = Attention(
-#      hidden_dim, hidden_dim, hidden_dim,
-#    )
-    self.attention = AttentionLayer(
-      encoder_hidden_dim, hidden_dim, encoder_hidden_dim
-    )
-
-    self.rnn = MultiLayerGRUCell(
-      embed_size = embed_dim + encoder_hidden_dim,
-      hidden_size = hidden_dim,
-      n_layers = n_layers,
-      drop_prob = dropout,
-    )
-#    self.rnn = nn.GRUCell(
-#      embed_dim + encoder_hidden_dim,
-#      hidden_dim
-#    )
-
-    self.out = nn.Sequential(
-      nn.Linear(hidden_dim + encoder_hidden_dim, len(dictionary)),
-#      nn.Linear(hidden_dim, len(dictionary)),
-    )
-
-    self.attentive_writer = AttentiveWriter(
-      encoder_hidden_dim + hidden_dim, encoder_hidden_dim, encoder_hidden_dim
-    )
-
-  def forward(self, prev_output_tokens, encoder_out, incremental_state=None):
-    if incremental_state is None:
-      max_len = prev_output_tokens.size(1)
-      res_out = []
-      attn_out = []
-      incremental_state = {}
-      for i in range(max_len):
-#        import pdb; pdb.set_trace()
-        res, attn = self.forward(prev_output_tokens, encoder_out, incremental_state)
-        res_out.append(res)
-        attn_out.append(attn)
-#      tbh = torch.stack(res_out, 0)
-#      packed = pack_padded_sequence(tbh, encoder_out['lens'])
-#      return packed
-#      import pdb; pdb.set_trace()
-#      return torch.cat(res_out, 0), None
-      tbh = torch.stack(res_out, 0).view(-1, res_out[0].size(1))
-      abh = torch.stack(attn_out, 1)
-      return tbh, abh
-    elif len(incremental_state) == 0: # incremental_state == {}
-      tgt_idx = 0
-      enc_out, final, _ = encoder_out['encoder_out']
-      hidden = self.enc2dec(final[-self.n_layers:])
-#      hidden = self.enc2dec(encoder_out['final'])[-self.n_layers:]
-    else:
-      tgt_idx = utils.get_incremental_state(
-        self, incremental_state, 'tgt_idx') + 1
-      enc_out = utils.get_incremental_state(
-        self, incremental_state, 'enc_out')
-      hidden = utils.get_incremental_state(
-        self, incremental_state, 'hidden')
-
-    pad_mask = encoder_out['encoder_padding_mask']
-    feed_tok = prev_output_tokens[:, tgt_idx]
-    last_hidden = hidden[-1]
-
-    embedded = self.embed_tokens(feed_tok)
-    context, attn = self.attention(
-      last_hidden, enc_out, pad_mask
-    )
-    rnn_input = torch.cat([embedded, context], 1)
-    hidden = self.rnn(rnn_input, hidden)
-#    import pdb; pdb.set_trace()
-    with_context = torch.cat([hidden[-1], context], 1)
-#    with_context = hidden[-1]
-    output = self.out(with_context)
-
-#    enc_out = self.attentive_writer(with_context, enc_out, pad_mask=pad_mask)
-
-    # set the incremental state
-    utils.set_incremental_state(
-      self, incremental_state, 'enc_out', enc_out
-    )
-    utils.set_incremental_state(
-      self, incremental_state, 'hidden', hidden
-    )
-    utils.set_incremental_state(
-      self, incremental_state, 'tgt_idx', tgt_idx
-    )
-    return output, attn
-
-  def reorder_incremental_state(self, incremental_state, new_order):
-    enc_out = utils.get_incremental_state(
-      self, incremental_state, 'enc_out'
-    )
-    hidden = utils.get_incremental_state(
-      self, incremental_state, 'hidden'
-    )
-
-    utils.set_incremental_state(
-      self, incremental_state, 'enc_out', enc_out.index_select(new_order, dim=1)
-    )
-    utils.set_incremental_state(
-      self, incremental_state, 'hidden', hidden.index_select(new_order, dim=1)
-    )
 
 from fairseq.models.lstm import Linear
 class AttentionLayer(nn.Module):
@@ -474,7 +259,6 @@ class Attention(nn.Module):
     self.h_size = h
 
   def forward(self, query, keys, values = None, pad_mask = None):
-#    import pdb; pdb.set_trace()
     attn_energies = self.score(query, keys)
     probs = F.softmax(attn_energies, dim=1)
     if pad_mask is not None:
@@ -583,23 +367,15 @@ class Scratchpad(FairseqModel):
       encoder_output_units = args.encoder_hidden_dim,
       dropout_out = args.decoder_dropout,
       dropout_in = args.decoder_dropout,
-#      use_scratchpad = args.scratchpad,
-      use_scratchpad=True,
-#      use_scratchpad=False,
+      use_scratchpad = args.scratchpad,
     )
 
     model = Scratchpad(encoder, decoder)
     print(model)
+    n_par = sum([np.prod(p.size()) for p in model.parameters()])
+    print("N model params!: {:,}".format(n_par))
 
     return model
-
-    # def forward(self, src_tokens, src_lengths, prev_output_tokens):
-    #     encoder_out = self.encoder(src_tokens, src_lengths)
-    #     decoder_out = self.decoder(prev_output_tokens, encoder_out)
-    #     return decoder_out
-
-#def forward(self, src_tokens, src_lengths, prev_output_tokens):
-
 
 
 from fairseq.models import register_model_architecture
